@@ -15,11 +15,18 @@
   li span { flex: 1; overflow-wrap: anywhere; }
   ul { padding: 0; }
   #status { min-height: 1.6em; }
+  .reminder-entry { display: flex; flex-wrap: wrap; gap: 8px; }
+  .reminder-entry input { font: inherit; padding: 7px; }
+  #name { flex: 1; min-width: 180px; }
+  #rows article { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid #80808055; }
+  #rows article span { flex: 1; overflow-wrap: anywhere; }
+  #rows small { display: block; }
 </style>
-<h1>文件轮盘</h1>
-<p>在资源管理器或桌面拖起文件，按住左键停稳半秒，悬停展开子目录，滚轮逐项浏览，松手复制。将文件放到圆心可保留这批文件。点击圆心可切换移动或复制。</p>
+<main id="wheel-settings">
+<h1>轮盘设置</h1>
 <button id="start">启动监听</button>
 <button id="stop">停止监听</button>
+<button id="open-reminders" type="button">打开提醒</button>
 <label><input type="checkbox" id="startup"> 登录 Windows 时启动</label>
 
 <section>
@@ -29,5 +36,19 @@
   <ul id="folders"></ul>
 </section>
 <p id="status" role="status"></p>
+</main>
+<main id="wheel-reminders" hidden>
+  <button id="back-to-wheel" type="button">返回轮盘设置</button>
+  <h1>提醒</h1>
+  <form id="entry" class="reminder-entry">
+    <input id="name" placeholder="要提醒什么？" aria-label="任务名称" required maxlength="300">
+    <input id="at" type="datetime-local" aria-label="提醒时间" required>
+    <button type="submit">保存</button>
+  </form>
+  <p><button id="minute">1 分钟后</button> <button id="reset">清空输入</button> <button id="refresh">刷新清单</button></p>
+  <p id="msg" role="status"></p>
+  <div id="rows"></div>
+</main>
+<script src="taskbell/ui.js"></script>
 <script src="settings.js"></script>
 </html>

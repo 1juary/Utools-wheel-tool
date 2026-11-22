@@ -17,6 +17,7 @@ class Visit
 
 class Folders
 {
+    public const int MaxDirectoryTargets = 6;
     public static readonly string Home = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UToolsWheel");
     static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
@@ -84,6 +85,6 @@ class Folders
     {
         return (manual ?? new string[0]).Concat(shellPaths.Concat(history))
             .Where(path => !String.IsNullOrWhiteSpace(path) && Directory.Exists(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToArray();
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxDirectoryTargets).ToArray();
     }
 }

@@ -4,13 +4,34 @@
   "logo": "logo.png",
   "features": [
     {
+      "code": "wheel-settings",
+      "description": "管理监听、登录自启和手动目录",
+      "platform": "win32",
+      "cmds": ["轮盘设置"]
+    },
+    {
       "code": "file-wheel",
       "cmds": [
         "文件轮盘",
-        "拖拽轮盘"
+        { "type": "files", "label": "文件轮盘" }
       ],
-      "description": "管理拖放轮盘、登录自启和目标文件夹",
+      "description": "打开常用目录，或复制和移动已选文件",
       "platform": "win32"
+    },
+    {
+      "code": "text-wheel",
+      "description": "设置提醒时间并查看提醒清单",
+      "platform": "win32",
+      "cmds": [
+        "文本轮盘",
+        {
+          "type": "over",
+          "label": "文本轮盘",
+          "exclude": "/[\\r\\n]|^\\s*$/",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      ]
     }
   ]
 }

@@ -19,7 +19,13 @@ class Program
         {
             if (args.Length > 0)
             {
-                Command(args[0]);
+                if (args[0] == "--file-wheel")
+                {
+                    var files = args.Length == 2 ?
+                        Folders.Read<string[]>(args[1]) : null;
+                    Environment.ExitCode = ChooseFileWheel(files);
+                }
+                else Command(args[0]);
                 return;
             }
             using (var single = new Mutex(false, @"Local\UToolsWheel.Instance"))
@@ -45,6 +51,34 @@ class Program
         }
     }
 
+    static int ChooseFileWheel(string[] files)
+    {
+        Application.EnableVisualStyles();
+        var folders = new Folders();
+        using (var wheel = new Wheel())
+        using (var timer = new System.Windows.Forms.Timer { Interval = 25 })
+        using (var hook = new WheelScrollHook(wheel.QueueScroll))
+        {
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            bool wasDown = Listener.KeyDown(1);
+            timer.Tick += delegate
+            {
+                bool down = Listener.KeyDown(1);
+                if (elapsed.Elapsed.TotalSeconds >= 45 || Listener.KeyDown(27) ||
+                    (down && !wasDown && !wheel.ContainsScreenPoint(Cursor.Position)))
+                    wheel.Close();
+                else wheel.ApplyScroll();
+                wasDown = down;
+            };
+            var targets = folders.Targets(Listener.ShellFolders(true));
+            if (targets.Length == 0) return 11;
+            wheel.Probe(Cursor.Position, targets, true, files);
+            timer.Start();
+            Application.Run(wheel);
+            return 0;
+        }
+    }
+
     static void Command(string command)
     {
         if (command == "--stop")
@@ -67,9 +101,26 @@ class Program
     }
 }
 
+static class GestureLog
+{
+    public static void Write(string stage)
+    {
+        try
+        {
+            Directory.CreateDirectory(Folders.Home);
+            string file = Path.Combine(Folders.Home, "gesture.log");
+            if (File.Exists(file) && new FileInfo(file).Length > 65536) File.Delete(file);
+            File.AppendAllText(file, DateTime.Now.ToString("HH:mm:ss.fff") + " " + stage + Environment.NewLine);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+}
+
 class Listener : ApplicationContext
 {
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    internal static bool KeyDown(int key) { return GetAsyncKeyState(key) < 0; }
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder name, int size);
@@ -81,15 +132,22 @@ class Listener : ApplicationContext
     readonly Wheel wheel = new Wheel();
     readonly WheelScrollHook scrollHook;
     bool wasDown, candidate, attempted;
+    string pendingReminder;
     Point origin, still;
+    Point? releasePoint;
     long stillSince, probeSince;
 
     public Listener(EventWaitHandle stop)
     {
         this.stop = stop;
-        scrollHook = new WheelScrollHook(wheel.QueueScroll);
+        scrollHook = new WheelScrollHook(wheel.QueueScroll, RecordTextRelease);
+        wheel.TextReminderRequested += text => pendingReminder = text;
         input.Tick += Tick;
-        browse.Tick += delegate { folders.Observe(ShellFolders(false)); };
+        browse.Tick += delegate
+        {
+            if (!wheel.Visible && !KeyDown(1)) folders.Observe(ShellFolders(false));
+        };
+        GestureLog.Write("listener " + Path.GetFileName(Application.ExecutablePath));
         input.Start();
         browse.Start();
     }
@@ -101,7 +159,7 @@ class Listener : ApplicationContext
         return new[] { "CabinetWClass", "ExploreWClass", "Progman", "WorkerW" }.Contains(name.ToString());
     }
 
-    static string[] ShellFolders(bool quickAccess)
+    internal static string[] ShellFolders(bool quickAccess)
     {
         var paths = new List<string>();
         try
@@ -148,27 +206,67 @@ class Listener : ApplicationContext
     {
         if (stop.WaitOne(0)) { ExitThread(); return; }
         wheel.ApplyScroll();
-        bool down = GetAsyncKeyState(1) < 0;
-        var cursor = Cursor.Position;
-        long now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+        if (pendingReminder != null)
+        {
+            string text = pendingReminder;
+            pendingReminder = null;
+            wheel.Hide();
+            var editor = new QuickReminder(text);
+            editor.Shown += delegate { GestureLog.Write("editor shown"); };
+            editor.Show();
+        }
+        ObservePointer(KeyDown(1), KeyDown(27), Cursor.Position, CurrentMilliseconds());
+    }
+
+    static long CurrentMilliseconds()
+    {
+        return DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+    }
+
+    void RecordTextRelease()
+    {
+        if (wheel.RecordTextRelease(Cursor.Position)) probeSince = CurrentMilliseconds();
+    }
+
+    void ObservePointer(bool down, bool escape, Point cursor, long now)
+    {
+        if (wheel.Visible && (wheel.HasText || wheel.Choosing) && escape)
+        {
+            wheel.Hide();
+            candidate = false;
+            wasDown = down;
+            return;
+        }
         if (wheel.Choosing)
         {
-            if (GetAsyncKeyState(27) < 0 || (down && !wasDown && !wheel.ContainsScreenPoint(cursor)))
-                wheel.Hide();
-            wasDown = down;
-            candidate = false;
-            return;
+            if (!down || wasDown || wheel.ContainsScreenPoint(cursor))
+            {
+                wasDown = down;
+                candidate = false;
+                return;
+            }
+            // Handle an outside press as the start of the next gesture below.
         }
         if (!down)
         {
-            if (wasDown) probeSince = now;
-            if (wheel.Visible && now - probeSince > 175) wheel.Hide();
+            if (wasDown)
+            {
+                probeSince = now;
+                releasePoint = cursor;
+            }
+            if (wheel.Visible && now - probeSince > 175)
+            {
+                // Give OLE the first chance to drop, then use the pointer captured at release.
+                if (!wheel.FinishReleasedText(releasePoint)) wheel.Hide();
+                releasePoint = null;
+            }
         }
         else if (!wasDown)
         {
             wheel.Hide();
-            candidate = ExplorerForeground();
+            candidate = true;
             attempted = false;
+            releasePoint = null;
             origin = still = cursor;
             stillSince = now;
         }
@@ -179,11 +277,12 @@ class Listener : ApplicationContext
             {
                 attempted = true;
                 probeSince = now;
-                var targets = folders.Targets(ShellFolders(true));
-                if (targets.Length > 0 && GetAsyncKeyState(1) < 0) wheel.Probe(cursor, targets);
+                bool explorer = ExplorerForeground();
+                var targets = explorer ? folders.Targets(ShellFolders(true)) : new string[0];
+                if (GetAsyncKeyState(1) < 0) wheel.Probe(cursor, targets);
             }
         }
-        else if (wheel.Visible && !wheel.HasFiles && now - probeSince > 400) wheel.Hide();
+        else if (wheel.Visible && !wheel.HasFiles && !wheel.HasText && now - probeSince > 400) wheel.Hide();
         wasDown = down;
     }
 
@@ -199,6 +298,7 @@ class Listener : ApplicationContext
 
 class Wheel : Form
 {
+    const string Reminder = ":taskbell";
     const int SizePx = 344;
     const int Radius = 165;
     const int Center = SizePx / 2;
@@ -222,13 +322,21 @@ class Wheel : Form
     string hoverKey;
     Action pending;
     string[] held;
+    string heldText;
+    string draggedText;
+    Point? textReleasePoint;
+    bool textDragCanceled;
+    bool reminderPressed;
+    public event Action<string> TextReminderRequested;
     bool move;
     bool centerPressed;
     bool openRight;
     int columns;
     Point centerPoint;
     Rectangle screen;
-    public bool Choosing { get { return held != null; } }
+    public bool Choosing { get { return held != null || heldText != null; } }
+    bool shortcut;
+    bool reminderHovered;
 
     sealed class MenuRow
     {
@@ -240,6 +348,7 @@ class Wheel : Form
         public Action Navigate;
     }
     public bool HasFiles { get; private set; }
+    public bool HasText { get; private set; }
 
     public Wheel()
     {
@@ -272,16 +381,23 @@ class Wheel : Form
         get { var options = base.CreateParams; options.ExStyle |= 0x08000000; return options; }
     }
 
-    public void Probe(Point cursor, string[] folders)
+    public void Probe(Point cursor, string[] folders, bool shortcut = false, string[] files = null)
     {
-        targets = folders;
+        GestureLog.Write("probe");
+        targets = folders.Take(Folders.MaxDirectoryTargets).ToArray();
+        this.shortcut = shortcut;
         HasFiles = false;
-        held = null;
+        HasText = false;
+        draggedText = null;
+        textReleasePoint = null;
+        textDragCanceled = false;
+        held = files != null && files.Length > 0 ? files : null;
+        heldText = null;
         move = false;
         ClearHover();
         branch.Clear();
         rows.Clear();
-        Opacity = 0.02;
+        Opacity = shortcut ? 1 : 0.02;
         screen = Screen.FromPoint(cursor).Bounds;
         ClientSize = new Size(SizePx, SizePx);
         Location = new Point(Math.Max(screen.Left, Math.Min(cursor.X - Center, screen.Right - SizePx)),
@@ -289,6 +405,7 @@ class Wheel : Form
         centerPoint = new Point(Left + Center, Top + Center);
         Invalidate();
         Show();
+        Update();
     }
 
     protected override void OnVisibleChanged(EventArgs e)
@@ -296,6 +413,11 @@ class Wheel : Form
         if (!Visible)
         {
             held = null;
+            heldText = null;
+            draggedText = null;
+            textReleasePoint = null;
+            textDragCanceled = false;
+            reminderPressed = false;
             centerPressed = false;
             scrollDeltas.Clear();
             scrollPosition = null;
@@ -321,12 +443,13 @@ class Wheel : Form
         pending = null;
         hovered = hoverKey = null;
         activeRow = null;
+        reminderHovered = false;
     }
 
     public bool ContainsScreenPoint(Point point)
     {
         var local = PointToClient(point);
-        return IsCenter(local) || RootAt(local) != null || RowAt(local) != null;
+        return IsCenter(local) || SectorAt(local) != null || RowAt(local) != null;
     }
 
     Point LocalCenter { get { return PointToClient(centerPoint); } }
@@ -340,6 +463,13 @@ class Wheel : Form
 
     string RootAt(Point point)
     {
+        string sector = SectorAt(point);
+        return sector == Reminder ? null : sector;
+    }
+
+    string SectorAt(Point point)
+    {
+        if (targets.Length == 0) return null;
         var center = LocalCenter;
         double x = point.X - center.X, y = point.Y - center.Y;
         double distance = x * x + y * y;
@@ -399,7 +529,7 @@ class Wheel : Form
 
     public bool QueueScroll(int delta)
     {
-        if (!Visible || !HasFiles || delta == 0) return false;
+        if (!Visible || (!shortcut && !HasFiles) || delta == 0) return false;
         // Hook coordinates are physical pixels. Cursor.Position uses the same DPI context as this form.
         return QueueScrollAt(PointToClient(Cursor.Position), delta);
     }
@@ -470,6 +600,7 @@ class Wheel : Form
         string key = row != null && row.Navigate != null ? "@" + row.Bounds.Location : path;
         activeRow = row;
         hovered = path;
+        reminderHovered = HasText && row == null && SectorAt(point) == Reminder;
         if (scrollPosition.HasValue)
         {
             var screenPoint = PointToScreen(point);
@@ -497,32 +628,75 @@ class Wheel : Form
 
     protected override void OnDragEnter(DragEventArgs e) { UpdateDrag(e); }
     protected override void OnDragOver(DragEventArgs e) { UpdateDrag(e); }
-    protected override void OnDragLeave(EventArgs e) { ClearHover(); Invalidate(); }
+    protected override void OnDragLeave(EventArgs e)
+    {
+        if (HasText && !Choosing && Listener.KeyDown(27)) textDragCanceled = true;
+        ClearHover();
+        Invalidate();
+    }
 
     static bool AcceptsFiles(DragEventArgs e)
     {
         return (e.AllowedEffect & DragDropEffects.Copy) != 0 && e.Data.GetDataPresent(DataFormats.FileDrop);
     }
 
+    internal static string ReadDraggedText(IDataObject data)
+    {
+        if (data.GetDataPresent(DataFormats.FileDrop) ||
+            data.GetDataPresent("UniformResourceLocator") || data.GetDataPresent("UniformResourceLocatorW"))
+            return null;
+        string text = data.GetData(DataFormats.UnicodeText) as string ??
+            data.GetData(DataFormats.Text) as string;
+        if (String.IsNullOrWhiteSpace(text)) return null;
+        text = text.Trim();
+        if (text.Length <= 300) return text;
+        return text.Substring(0, Char.IsHighSurrogate(text[299]) ? 299 : 300);
+    }
+
     void UpdateDrag(DragEventArgs e)
     {
-        if (Choosing || !AcceptsFiles(e))
+        if (shortcut || Choosing)
         {
             e.Effect = DragDropEffects.None;
-            if (!Choosing) Hide();
             return;
         }
-        HasFiles = true;
+        if (!HasFiles && !HasText)
+        {
+            HasFiles = targets.Length > 0 && AcceptsFiles(e);
+            draggedText = !HasFiles && (e.AllowedEffect & DragDropEffects.Copy) != 0 ?
+                ReadDraggedText(e.Data) : null;
+            HasText = draggedText != null;
+            if (!HasFiles && !HasText)
+            {
+                e.Effect = DragDropEffects.None;
+                Hide();
+                return;
+            }
+            if (HasText)
+            {
+                GestureLog.Write("text entered");
+                targets = new[] { Reminder };
+            }
+        }
         Opacity = 1;
         var point = PointToClient(new Point(e.X, e.Y));
         Track(point);
-        e.Effect = hovered != null || IsCenter(point) ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Effect = hovered != null || IsCenter(point) || reminderHovered ?
+            DragDropEffects.Copy : DragDropEffects.None;
     }
 
     protected override void OnDragDrop(DragEventArgs e)
     {
         e.Effect = DragDropEffects.None;
-        if (Choosing || !HasFiles || !AcceptsFiles(e)) return;
+        if (shortcut || Choosing) return;
+        if (HasText)
+        {
+            GestureLog.Write("OLE drop");
+            if (FinishReleasedText(new Point(e.X, e.Y))) e.Effect = e.AllowedEffect & DragDropEffects.Copy;
+            else Hide();
+            return;
+        }
+        if (!HasFiles || !AcceptsFiles(e)) return;
         var paths = e.Data.GetData(DataFormats.FileDrop) as string[];
         if (paths == null || paths.Length == 0) { Hide(); return; }
         var point = PointToClient(new Point(e.X, e.Y));
@@ -547,22 +721,35 @@ class Wheel : Form
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        if (Choosing) Track(e.Location);
+        if (shortcut || Choosing) Track(e.Location);
     }
 
     protected override void OnMouseLeave(EventArgs e)
     {
-        if (Choosing) { ClearHover(); Invalidate(); }
+        if (shortcut || Choosing) { ClearHover(); Invalidate(); }
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
-        centerPressed = Choosing && e.Button == MouseButtons.Left && IsCenter(e.Location);
+        centerPressed = held != null && e.Button == MouseButtons.Left && IsCenter(e.Location);
+        reminderPressed = heldText != null && e.Button == MouseButtons.Left && SectorAt(e.Location) == Reminder;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
+        if (shortcut && !Choosing && e.Button == MouseButtons.Left)
+        {
+            ChooseShortcut(e.Location);
+            return;
+        }
         if (!Choosing || e.Button != MouseButtons.Left) return;
+        if (heldText != null)
+        {
+            bool open = reminderPressed && SectorAt(e.Location) == Reminder;
+            reminderPressed = false;
+            if (open) OpenTextReminder(heldText);
+            return;
+        }
         bool toggle = centerPressed && IsCenter(e.Location);
         centerPressed = false;
         if (IsCenter(e.Location))
@@ -586,7 +773,78 @@ class Wheel : Form
         var paths = held;
         bool moving = move;
         Hide();
-        BeginInvoke(new Action(() => Transfer(paths, target, moving)));
+        if (shortcut)
+        {
+            Transfer(paths, target, moving);
+            Close();
+        }
+        else BeginInvoke(new Action(() => Transfer(paths, target, moving)));
+    }
+
+    internal bool RecordTextRelease(Point screenPoint)
+    {
+        if (!Visible || Choosing || draggedText == null || textDragCanceled) return false;
+        textReleasePoint = screenPoint;
+        return true;
+    }
+
+    internal bool FinishReleasedText(Point? screenPoint)
+    {
+        var actual = textReleasePoint ?? screenPoint;
+        if (HasText && !Choosing) GestureLog.Write(textDragCanceled ? "release canceled" :
+            textReleasePoint.HasValue ? "release from hook" : actual.HasValue ? "release from event" : "release missing");
+        return !textDragCanceled && actual.HasValue && FinishTextDrop(PointToClient(actual.Value));
+    }
+
+    bool FinishTextDrop(Point point)
+    {
+        if (Choosing || draggedText == null) return false;
+        bool keep = IsCenter(point);
+        if (!keep && SectorAt(point) != Reminder)
+        {
+            GestureLog.Write("release outside wheel");
+            return false;
+        }
+        string text = draggedText;
+        draggedText = null;
+        if (keep)
+        {
+            GestureLog.Write("text retained");
+            heldText = text;
+            ClearHover();
+            Invalidate();
+        }
+        else OpenTextReminder(text);
+        return true;
+    }
+
+    void OpenTextReminder(string title)
+    {
+        // Let the source finish its OLE Drop before hiding the registered drop target.
+        heldText = null;
+        GestureLog.Write("editor requested");
+        var requested = TextReminderRequested;
+        if (requested != null) requested(title);
+    }
+
+    void ChooseShortcut(Point point)
+    {
+        var row = RowAt(point);
+        if (row != null && row.Navigate != null) { row.Navigate(); return; }
+        string choice = row == null ? SectorAt(point) : row.Path;
+        if (choice == null && !IsCenter(point)) return;
+        if (choice != null)
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(choice) { UseShellExecute = true });
+            }
+            catch (System.ComponentModel.Win32Exception error)
+            {
+                MessageBox.Show(error.Message, "文件轮盘");
+            }
+        }
+        Close();
     }
     static void Transfer(string[] paths, string target, bool move)
     {
@@ -649,13 +907,14 @@ class Wheel : Form
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        if (targets.Length == 0) return;
         var graphics = e.Graphics;
-        if (!HasFiles)
+        if (!shortcut && !HasFiles && !HasText)
         {
+            // Text drags start with no directory targets. Paint a hit surface before checking the list.
             graphics.Clear(Color.FromArgb(31, 44, 61));
             return;
         }
+        if (targets.Length == 0) return;
         var origin = LocalCenter;
         graphics.SmoothingMode = SmoothingMode.AntiAlias;
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
@@ -688,8 +947,9 @@ class Wheel : Form
             {
                 float start = -90 + i * span;
                 string path = targets[i];
-                bool pointed = path == hovered && activeRow == null;
-                bool opened = branch.Contains(path);
+                bool reminder = path == Reminder;
+                bool pointed = reminder ? reminderHovered : path == hovered && activeRow == null;
+                bool opened = !reminder && branch.Contains(path);
                 using (var sector = Sector(origin, start + 0.4f, span - 0.8f))
                 {
                     graphics.FillPath(pointed ? accent : opened ? expanded : surface, sector);
@@ -698,14 +958,15 @@ class Wheel : Form
                 double radians = (start + span / 2) * Math.PI / 180;
                 float x = origin.X + (float)Math.Cos(radians) * 109;
                 float y = origin.Y + (float)Math.Sin(radians) * 109;
-                graphics.DrawString(NameOf(path), label, pointed ? Brushes.White : text,
+                graphics.DrawString(reminder ? "提醒" : NameOf(path), label,
+                    pointed ? Brushes.White : text,
                     new RectangleF(x - 47, y - 12, 94, 24), centered);
             }
 
             graphics.FillEllipse(accent, origin.X - Hole, origin.Y - Hole, 2 * Hole, 2 * Hole);
-            graphics.DrawString(move ? "移动" : "复制", strong, Brushes.White,
+            graphics.DrawString(HasText ? "文本" : shortcut && !Choosing ? "文件" : move ? "移动" : "复制", strong, Brushes.White,
                 new RectangleF(origin.X - Hole, origin.Y - 22, 2 * Hole, 24), centered);
-            graphics.DrawString(Choosing ? "点击切换" : "松手保留", small, Brushes.White,
+            graphics.DrawString(HasText ? (heldText != null ? "点击提醒" : reminderHovered ? "松手提醒" : "松手保留") : shortcut && !Choosing ? "点击关闭" : Choosing ? "点击切换" : "松手保留", small, Brushes.White,
                 new RectangleF(origin.X - Hole, origin.Y + 2, 2 * Hole, 23), centered);
 
             double progress = Math.Min(1, transition.Elapsed.TotalMilliseconds / AnimationMs);

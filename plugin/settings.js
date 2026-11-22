@@ -3,6 +3,7 @@ const api = window.wheelSettings;
 const startup = byId('startup');
 const status = byId('status');
 let manual = [];
+let wheelOpen = false;
 
 function render() {
   const list = byId('folders');
@@ -47,6 +48,7 @@ byId('stop').onclick = () => report(async () => {
   await api.control('stop');
   status.textContent = '已发送停止请求。';
 });
+byId('open-reminders').onclick = () => report(() => window.showWheelReminders(''));
 startup.onchange = () => report(async () => {
   startup.disabled = true;
   try {
@@ -63,4 +65,36 @@ report(() => {
   manual = settings.manual;
   startup.checked = settings.startup;
   render();
+});
+
+function showSettings() {
+  byId('wheel-reminders').hidden = true;
+  byId('wheel-settings').hidden = false;
+}
+
+window.utools.onPluginEnter(({ code, type, payload }) => {
+  if (!code || code === 'wheel-settings') {
+    showSettings();
+    return;
+  }
+  if (code === 'text-wheel') {
+    const title = type === 'over' && typeof payload === 'string' ? payload.trim() : '';
+    report(() => window.showWheelReminders(title));
+    return;
+  }
+  if (code !== 'file-wheel' || wheelOpen) return;
+  wheelOpen = true;
+  report(async () => {
+    try {
+      window.utools.hideMainWindow();
+      const files = Array.isArray(payload) ? payload.map(item => item?.path).filter(path => typeof path === 'string' && path) : [];
+      await api.chooseFolder(files);
+    } catch (error) {
+      showSettings();
+      window.utools.showMainWindow();
+      throw error;
+    } finally {
+      wheelOpen = false;
+    }
+  });
 });

@@ -1,0 +1,16 @@
+{
+  "main": "index.html",
+  "preload": "preload.js",
+  "logo": "logo.png",
+  "features": [
+    {
+      "code": "file-wheel",
+      "cmds": [
+        "文件轮盘",
+        "拖拽轮盘"
+      ],
+      "description": "管理拖放轮盘、登录自启和目标文件夹",
+      "platform": "win32"
+    }
+  ]
+}

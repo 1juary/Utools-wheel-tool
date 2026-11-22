@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>文件轮盘</title>
+<style>
+  :root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
+  body { max-width: 620px; margin: 30px auto; padding: 0 22px; }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  h2 { font-size: 17px; }
+  p { line-height: 1.6; }
+  section { border-top: 1px solid #80808055; margin-top: 22px; padding-top: 12px; }
+  button { font: inherit; padding: 6px 11px; border-radius: 6px; border: 1px solid #80808088; cursor: pointer; }
+  li { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+  li span { flex: 1; overflow-wrap: anywhere; }
+  ul { padding: 0; }
+  #status { min-height: 1.6em; }
+</style>
+<h1>文件轮盘</h1>
+<p>在资源管理器或桌面拖起文件，按住左键停稳半秒，悬停展开子目录，滚轮逐项浏览，松手复制。将文件放到圆心可保留这批文件。点击圆心可切换移动或复制。</p>
+<button id="start">启动监听</button>
+<button id="stop">停止监听</button>
+<label><input type="checkbox" id="startup"> 登录 Windows 时启动</label>
+
+<section>
+  <h2>轮盘目录</h2>
+  <p>自动推荐常用文件夹，手动添加的目录优先显示。</p>
+  <button id="add">添加文件夹</button>
+  <ul id="folders"></ul>
+</section>
+<p id="status" role="status"></p>
+<script src="settings.js"></script>
+</html>

@@ -131,6 +131,8 @@ class Listener : ApplicationContext
     readonly Folders folders = new Folders();
     readonly Wheel wheel = new Wheel();
     readonly WheelScrollHook scrollHook;
+    volatile string[] directoryTargets = new string[0];
+    int refreshingFolders;
     bool wasDown, candidate, attempted;
     string pendingReminder;
     Point origin, still;
@@ -145,11 +147,32 @@ class Listener : ApplicationContext
         input.Tick += Tick;
         browse.Tick += delegate
         {
-            if (!wheel.Visible && !KeyDown(1)) folders.Observe(ShellFolders(false));
+            if (!wheel.Visible && !KeyDown(1)) RefreshFolders();
         };
         GestureLog.Write("listener " + Path.GetFileName(Application.ExecutablePath));
         input.Start();
         browse.Start();
+        RefreshFolders();
+    }
+
+    void RefreshFolders()
+    {
+        if (Interlocked.Exchange(ref refreshingFolders, 1) != 0) return;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                if (directoryTargets.Length == 0) directoryTargets = folders.Targets(new string[0]);
+                var quickAccess = ShellFolders(true);
+                directoryTargets = folders.Targets(quickAccess);
+                folders.Observe(ShellFolders(false));
+                directoryTargets = folders.Targets(quickAccess);
+            }
+            catch (Exception error) { GestureLog.Write("folder refresh failed: " + error.GetType().Name); }
+            finally { Interlocked.Exchange(ref refreshingFolders, 0); }
+        }) { IsBackground = true };
+        worker.SetApartmentState(ApartmentState.STA);
+        worker.Start();
     }
 
     static bool ExplorerForeground()
@@ -225,7 +248,13 @@ class Listener : ApplicationContext
 
     void RecordTextRelease()
     {
-        if (wheel.RecordTextRelease(Cursor.Position)) probeSince = CurrentMilliseconds();
+        var cursor = Cursor.Position;
+        var now = CurrentMilliseconds();
+        wheel.RecordTextRelease(cursor);
+        releasePoint = cursor;
+        probeSince = now;
+        wasDown = false;
+        candidate = false;
     }
 
     void ObservePointer(bool down, bool escape, Point cursor, long now)
@@ -278,7 +307,7 @@ class Listener : ApplicationContext
                 attempted = true;
                 probeSince = now;
                 bool explorer = ExplorerForeground();
-                var targets = explorer ? folders.Targets(ShellFolders(true)) : new string[0];
+                var targets = explorer ? directoryTargets : new string[0];
                 if (GetAsyncKeyState(1) < 0) wheel.Probe(cursor, targets);
             }
         }
@@ -663,6 +692,7 @@ class Wheel : Form
         if (!HasFiles && !HasText)
         {
             HasFiles = targets.Length > 0 && AcceptsFiles(e);
+            if (HasFiles) GestureLog.Write("file entered");
             draggedText = !HasFiles && (e.AllowedEffect & DragDropEffects.Copy) != 0 ?
                 ReadDraggedText(e.Data) : null;
             HasText = draggedText != null;
@@ -714,7 +744,7 @@ class Wheel : Form
         if (target != null)
         {
             e.Effect = DragDropEffects.Copy;
-            BeginInvoke(new Action(() => Transfer(paths, target, moving)));
+            BeginInvoke(new Action(() => TransferInBackground(paths, target, moving)));
         }
         Hide();
     }
@@ -778,7 +808,7 @@ class Wheel : Form
             Transfer(paths, target, moving);
             Close();
         }
-        else BeginInvoke(new Action(() => Transfer(paths, target, moving)));
+        else TransferInBackground(paths, target, moving);
     }
 
     internal bool RecordTextRelease(Point screenPoint)
@@ -846,6 +876,13 @@ class Wheel : Form
         }
         Close();
     }
+    static void TransferInBackground(string[] paths, string target, bool move)
+    {
+        var worker = new Thread(() => Transfer(paths, target, move)) { IsBackground = true };
+        worker.SetApartmentState(ApartmentState.STA);
+        worker.Start();
+    }
+
     static void Transfer(string[] paths, string target, bool move)
     {
         try
@@ -873,6 +910,17 @@ class Wheel : Form
                 }
                 else if (Directory.Exists(source)) FileSystem.CopyDirectory(source, destination, UIOption.AllDialogs, UICancelOption.ThrowException);
                 else FileSystem.CopyFile(source, destination, UIOption.AllDialogs, UICancelOption.ThrowException);
+            }
+            try
+            {
+                if (paths.Length > 0)
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe",
+                        "/n, \"" + new DirectoryInfo(target).FullName.TrimEnd('\\') + "\\.\"") { UseShellExecute = false });
+                GestureLog.Write(move ? "file move completed" : "file copy completed");
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show("文件操作已完成，但无法打开目标文件夹。\n" + error.Message, "文件轮盘");
             }
         }
         catch (OperationCanceledException) { }

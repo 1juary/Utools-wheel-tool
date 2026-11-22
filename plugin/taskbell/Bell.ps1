@@ -12,14 +12,43 @@ function Store($t){
   [IO.File]::WriteAllText($tmp,($t|ConvertTo-Json))
   if([IO.File]::Exists($file)){[IO.File]::Replace($tmp,$file,$file+'.bak')}else{[IO.File]::Move($tmp,$file)}
 }
-function Schedule($key,$trigger,$mode){
-  $a=New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument ('//B //Nologo "'+(Join-Path $PSScriptRoot 'Reminder.vbs')+'" '+$mode)
-  $s=New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([timespan]::Zero)
-  Register-ScheduledTask -TaskName ($prefix+$key) -Action $a -Trigger $trigger -Settings $s -User $user.Name -Force | Out-Null
+function Scheduler {
+  if(!$script:service){
+    $script:service=New-Object -ComObject Schedule.Service
+    $script:service.Connect()
+    $script:taskRoot=$script:service.GetFolder('\')
+  }
 }
-function Arm($t){Schedule $t.id (New-ScheduledTaskTrigger -Once -At ([datetimeoffset]::Parse($t.remindAt).LocalDateTime)) Alarm}
+function Schedule($key,$at,$mode){
+  Scheduler
+  $definition=$script:service.NewTask(0)
+  $definition.Principal.UserId=$user.Name
+  $definition.Principal.LogonType=3 # TASK_LOGON_INTERACTIVE_TOKEN
+  $definition.Settings.StartWhenAvailable=$true
+  $definition.Settings.WakeToRun=$true
+  $definition.Settings.DisallowStartIfOnBatteries=$false
+  $definition.Settings.StopIfGoingOnBatteries=$false
+  $definition.Settings.ExecutionTimeLimit='PT0S'
+  if($mode -eq 'Recover'){
+    $trigger=$definition.Triggers.Create(9) # TASK_TRIGGER_LOGON
+    $trigger.UserId=$user.Name
+  }else{
+    $trigger=$definition.Triggers.Create(1) # TASK_TRIGGER_TIME
+    $trigger.StartBoundary=([datetimeoffset]::Parse($at)).ToString("yyyy-MM-dd'T'HH:mm:sszzz")
+  }
+  $action=$definition.Actions.Create(0)
+  $action.Path="$env:SystemRoot\System32\wscript.exe"
+  $action.Arguments='//B //Nologo "'+(Join-Path $PSScriptRoot 'Reminder.vbs')+'" '+$mode
+  $null=$script:taskRoot.RegisterTaskDefinition(($prefix+$key),$definition,6,$user.Name,$null,3)
+}
+function Arm($t){Schedule $t.id $t.remindAt Alarm}
 function Disarm($id){
-  if(Get-ScheduledTask -TaskName ($prefix+$id) -ErrorAction SilentlyContinue){Unregister-ScheduledTask -TaskName ($prefix+$id) -Confirm:$false}
+  Scheduler
+  try{$script:taskRoot.DeleteTask(($prefix+$id),0)}
+  catch{
+    $cause=$_.Exception.GetBaseException()
+    if($cause.HResult -ne -2147024894){throw} # Already removed (ERROR_FILE_NOT_FOUND).
+  }
 }
 function Due { Items | Where-Object {$_.status -eq 'pending' -and !$_.silent -and [datetimeoffset]::Parse($_.remindAt) -le [datetimeoffset]::Now} }
 if($Payload){$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Payload))|ConvertFrom-Json}
@@ -31,14 +60,15 @@ function Locked([scriptblock]$body){
 if($Action -eq 'Check'){
   $player=New-Object Media.SoundPlayer((Join-Path $PSScriptRoot 'bell.wav'))
   $player.Load()
-  Get-Command Register-ScheduledTask | Out-Null
+  Scheduler
   'OK';return
 }
 if($Action -eq 'List'){Locked {ConvertTo-Json -InputObject @(Items) -Compress};return}
 if($Action -in 'Save','Done','Delete'){
   Locked {
     $id=if($p.id){([guid]$p.id).ToString()}else{[guid]::NewGuid().ToString()}
-    $t=Items | Where-Object id -eq $id
+    $record=Join-Path $dir ($id+'.json')
+    $t=if($p.id -and [IO.File]::Exists($record)){[IO.File]::ReadAllText($record)|ConvertFrom-Json}
     if($p.id -and !$t){
       if($Action -eq 'Delete'){return}
       throw '任务已删除'
@@ -57,7 +87,7 @@ if($Action -in 'Save','Done','Delete'){
 }
 if($Action -in 'Install','Recover'){
   Locked {
-    if($Action -eq 'Install'){Schedule 'Login' (New-ScheduledTaskTrigger -AtLogOn -User $user.Name) Recover}
+    if($Action -eq 'Install'){Schedule 'Login' $null Recover}
     foreach($t in Items){if($t.status -eq 'pending' -and !$t.silent -and [datetimeoffset]::Parse($t.remindAt) -gt [datetimeoffset]::Now){Arm $t}}
   }
   if(!(Due)){return}

@@ -34,8 +34,23 @@ window.onBellTasksChanged = callback => {
     watcher.close()
   }, {once:true})
 }
+async function listRecords() {
+  const names = await fs.promises.readdir(records)
+  const tasks = await Promise.all(names.filter(name => name.endsWith('.json')).map(async name => {
+    try {
+      const content = await fs.promises.readFile(path.join(records, name), 'utf8')
+      return JSON.parse(content.replace(/^\uFEFF/, ''))
+    } catch (error) {
+      if (error.code === 'ENOENT') return null
+      throw error
+    }
+  }))
+  return JSON.stringify(tasks.filter(Boolean))
+}
+
 window.bell = (action, data={}) => new Promise((resolve,reject)=>{
   deploy()
+  if (action === 'List') return resolve(listRecords())
   const payload = Buffer.from(JSON.stringify(data)).toString('base64')
   execFile(path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),
     ['-NoProfile','-ExecutionPolicy','Bypass','-File',script,action,payload],
